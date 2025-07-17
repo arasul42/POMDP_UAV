@@ -59,14 +59,14 @@ pomdp = QuickPOMDP(
 
     reward = function (s, a)
         if a isa Inspect
-            return -.10
+            return -1
         elseif a isa Land
             if s[a.cell] == :landing_zone
                 return 10.0
             elseif s[a.cell] == :obstacle
-                return -10000.0
+                return -100.0
             else
-                return -5000.0
+                return -50.0
             end
         end
     end,
@@ -74,8 +74,18 @@ pomdp = QuickPOMDP(
     initialstate = Uniform(all_grid_states),
 )
 
+
+struct ExploreOnlyRollout <: Policy end
+
+function POMDPs.action(::ExploreOnlyRollout, b)
+    return Inspect(rand(1:9))  # Always inspect
+end
+
+
+
+
 # --- Solver and belief updater ---
-solver = POMCPOWSolver(max_depth=15, tree_queries=5000, criterion=MaxUCB(5))
+solver = POMCPOWSolver(max_depth=20, tree_queries=10000, criterion=MaxUCB(5), enable_action_pw=false, check_repeat_act=true, check_repeat_obs=true)
 updater = DiscreteUpdater(pomdp)
 
 # --- True state ---
@@ -114,35 +124,28 @@ reward_for_plot = Float64[]
 anim = Animation()
 done = false
 
-for t in 1:40
+for t in 1:100
     global belief, true_state, cumulative_reward, done
     println("======== Time Step $t ========")
 
     # ✅ Use solver online at each step
     planner = POMCPOWPlanner(solver, pomdp)
-    a = action(planner, belief)
-    
+    a = action(planner, belief)    
     println("Selected Action: $a")
     push!(action_trace, string(a))
-
-    r = reward(pomdp, true_state, a)
-    cumulative_reward += r
-    push!(reward_for_plot, cumulative_reward)
-
-    if a isa Land
-        println("✈️ Landing attempted at timestep $t. Ending episode.")
-        break
-    end
-
-
-
-
-    obs = rand(observation(pomdp, true_state, a, true_state))
-    println("Received Observation:$obs")
-    println("Reward: $r | Cumulative Reward: $cumulative_reward")
-
     next_state_dist = transition_fn(true_state, a)
     true_state = rand(next_state_dist)
+    obs = rand(observation(pomdp, true_state, a, true_state))
+
+    cell_beliefs = cellwise_class_belief(belief, pomdp)
+
+    if a isa Land
+        conf = cell_beliefs[a.cell][:landing_zone]
+        if conf < 0.88
+            println("⚠️ Confidence too low (only $(round(conf, digits=3))). Skipping landing.")
+            a = Inspect(a.cell)
+        end
+    end
 
     belief = update(updater, belief, a, obs)
 
@@ -152,6 +155,26 @@ for t in 1:40
         confs = cell_beliefs[c]
         println("  Cell $c: ", join(["$(k) → $(round(v, digits=3))" for (k, v) in confs], ", "))
     end
+
+
+
+
+    r = reward(pomdp, true_state, a)
+    cumulative_reward += r
+    push!(reward_for_plot, cumulative_reward)
+    println("Received Observation:$obs")
+    println("Reward: $r | Cumulative Reward: $cumulative_reward")
+
+
+
+    if a isa Land
+        println("✈️ Landing attempted at timestep $t. Ending episode.")
+        break
+    end
+    
+
+
+
 
     colors = [begin
         confs = cell_beliefs[i]
@@ -192,7 +215,7 @@ for t in 1:40
 end
 
 # --- Save GIF ---
-gif(anim, "landing_belief_1.gif", fps=2)
+gif(anim, "landing_belief_1.gif", fps=5)
 
 # --- Print Summary ---
 println("==== Action Trace ====")
